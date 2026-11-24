@@ -1,0 +1,45 @@
+services:
+  bot:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    image: domovoy-alert-bot:latest
+    container_name: domovoy_alert_bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      PUSH_LISTEN_ADDR: ":8080"
+      TZ: Europe/Moscow
+    volumes:
+      - bot-data:/data
+    expose:
+      - "8080" # reachable only by caddy, not published on the host
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # HTTPS for Aqara Message Push. Needs PUBLIC_DOMAIN in .env and ports 80/443 free.
+  caddy:
+    image: caddy:2-alpine
+    container_name: domovoy_caddy
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - bot
+    logging: *logging
+
+volumes:
+  bot-data:
+  caddy-data:
+  caddy-config:

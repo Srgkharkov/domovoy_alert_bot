@@ -1,0 +1,60 @@
+# Настройка
+
+Нужно три вещи: токен Telegram-бота, ключи приложения Aqara и токен доступа к аккаунту Aqara Home.
+
+## 1. Telegram
+
+1. В [@BotFather](https://t.me/BotFather) уже создан `@domovoy_alert_bot`. Токен (`/token`) записать в `TELEGRAM_BOT_TOKEN`.
+2. Добавить бота в семейный чат.
+3. Режим приватности (`/setprivacy`) можно оставить включённым: бот получает команды (`/devices`) и нажатия кнопок, обычные сообщения ему не нужны.
+4. Запустить бота с пустым `TELEGRAM_ALLOWED_CHAT_IDS` и отправить в чате `/chatid`.
+5. Вписать полученный ID (у групп он отрицательный) в `TELEGRAM_ALLOWED_CHAT_IDS` и перезапустить бота.
+
+Можно указать несколько ID через запятую, например семейный чат и личный чат администратора.
+
+## 2. Aqara Developer
+
+1. Войти на [developer.aqara.com](https://developer.aqara.com) и создать проект (**Project Management → Create**).
+2. В проекте открыть **App ID / App Key / Key ID** и переписать их в `AQARA_APP_ID`, `AQARA_APP_KEY`, `AQARA_KEY_ID`.
+3. Выбрать в `AQARA_API_URL` сервер того региона, в котором зарегистрирован аккаунт **Aqara Home** (в приложении: Профиль → Настройки → Регион). Список серверов есть в `.env.example`.
+4. В `AQARA_ACCOUNT` записать **логин, под которым вы зарегистрированы на developer.aqara.com**.
+   Бесплатный (unpaid) разработчик может авторизовать только собственный аккаунт (ошибка `2046`).
+   Если устройства привязаны к другому аккаунту Aqara Home, поделитесь домом с аккаунтом разработчика:
+   в приложении Aqara Home выберите дом → Участники → Пригласить.
+
+> Для неподтверждённого (individual) проекта у Aqara есть лимиты на число вызовов API. Подробности смотрите в консоли разработчика.
+
+## 3. Авторизация Aqara
+
+Бот работает от имени аккаунта Aqara Home через токен OAuth. Получить его нужно один раз:
+
+```bash
+make auth-request              # docker compose run --rm bot auth request
+# на AQARA_ACCOUNT придёт код
+make auth-exchange CODE=123456 # docker compose run --rm bot auth exchange 123456
+```
+
+Токен сохраняется в Docker-том `bot-data` (`/data/aqara_token.json`). Токен действует 1 год, бот сам обновляет его через `refreshToken` за сутки до истечения.
+
+Без Docker то же самое делается так: `go run ./cmd/domovoy auth request` (с переменными из `.env`).
+
+## 4. Проверка
+
+Посмотреть, что видит бот (дома, сценарии, устройства):
+
+```bash
+docker compose run --rm bot check   # или: go run ./cmd/domovoy check
+# значение атрибутов устройства (DID из check), например датчика протечки:
+docker compose run --rm bot read <DID> 3.1.85 8.0.9001
+```
+
+Затем отправить в семейном чате `/devices`. Должен прийти список устройств.
+
+| Симптом | Причина |
+|---|---|
+| «Этот чат не авторизован» | ID чата не указан в `TELEGRAM_ALLOWED_CHAT_IDS` |
+| «Бот не авторизован в Aqara» | не выполнен шаг 3 |
+| `code 2046: Unpaid developer can only authorize their own account` | `AQARA_ACCOUNT` ≠ логин на developer.aqara.com |
+| `code 106` на `auth request` | приложение создано на сервере другого региона, чем `AQARA_API_URL` |
+| В логах `code 108…` / ошибка подписи | неверный `AQARA_KEY_ID` / `AQARA_APP_KEY` |
+| Пустой список устройств | выбран сервер `AQARA_API_URL` не того региона |

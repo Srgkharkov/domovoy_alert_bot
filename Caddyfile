@@ -1,0 +1,18 @@
+# Reverse proxy with automatic HTTPS (Let's Encrypt) for the Aqara push receiver.
+# PUBLIC_DOMAIN comes from .env; its DNS A record must point to this server.
+{$PUBLIC_DOMAIN} {
+	# Only the push endpoint and health check are exposed; everything else is 404.
+	handle /aqara/push/* {
+		reverse_proxy bot:8080
+	}
+	handle /healthz {
+		reverse_proxy bot:8080
+	}
+	handle {
+		respond 404
+	}
+	log {
+		output stdout
+		format console
+	}
+}

@@ -1,0 +1,18 @@
+# Secrets
+.env
+.env.deploy
+
+# Runtime state (Aqara tokens)
+data/
+
+# Build
+bin/
+*.exe
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json
