@@ -33,6 +33,7 @@ const helpText = `Домовой на связи 🏠
 /devices — список устройств Aqara и их статус
 /scenes — список сценариев (нажмите кнопку, чтобы запустить)
 /chatid — ID этого чата (для настройки)
+/access — кто имеет доступ (только администратор)
 /help — эта справка`
 
 func (b *Bot) handleCommand(ctx context.Context, m *tgbotapi.Message) {
@@ -46,7 +47,7 @@ func (b *Bot) handleCommand(ctx context.Context, m *tgbotapi.Message) {
 		return
 	}
 	if !b.isAllowed(chatID) {
-		b.reply(chatID, "⛔ Этот чат не авторизован. Добавьте его ID в TELEGRAM_ALLOWED_CHAT_IDS.")
+		b.handleUnknownChat(m)
 		return
 	}
 
@@ -62,6 +63,8 @@ func (b *Bot) handleCommand(ctx context.Context, m *tgbotapi.Message) {
 		b.cmdDevices(ctx, chatID)
 	case "scenes":
 		b.cmdScenes(ctx, chatID)
+	case "access":
+		b.cmdAccess(chatID)
 	default:
 		b.reply(chatID, "Не знаю такой команды. /help")
 	}
@@ -126,6 +129,10 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		return
 	}
 	chatID := q.Message.Chat.ID
+	if strings.HasPrefix(q.Data, callbackAccessPrefix) {
+		b.handleAccessCallback(q)
+		return
+	}
 	if !b.isAllowed(chatID) {
 		b.answerCallback(q.ID, "⛔ Чат не авторизован")
 		return

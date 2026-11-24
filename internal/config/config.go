@@ -35,6 +35,8 @@ type Alerts struct {
 type Telegram struct {
 	Token          string
 	AllowedChatIDs []int64 // only these chats may control the bot
+	// AdminChatID receives access requests from unknown chats (0 = disabled).
+	AdminChatID int64
 }
 
 // Aqara holds Aqara Open API (developer.aqara.com) settings.
@@ -53,6 +55,13 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("TELEGRAM_ALLOWED_CHAT_IDS: %w", err)
 	}
 
+	var adminID int64
+	if v := strings.TrimSpace(os.Getenv("TELEGRAM_ADMIN_CHAT_ID")); v != "" {
+		if adminID, err = strconv.ParseInt(v, 10, 64); err != nil {
+			return nil, fmt.Errorf("TELEGRAM_ADMIN_CHAT_ID: %w", err)
+		}
+	}
+
 	alertChats, err := parseInt64List(os.Getenv("TELEGRAM_ALERT_CHAT_IDS"))
 	if err != nil {
 		return nil, fmt.Errorf("TELEGRAM_ALERT_CHAT_IDS: %w", err)
@@ -69,6 +78,7 @@ func Load() (*Config, error) {
 		Telegram: Telegram{
 			Token:          os.Getenv("TELEGRAM_BOT_TOKEN"),
 			AllowedChatIDs: chatIDs,
+			AdminChatID:    adminID,
 		},
 		Aqara: Aqara{
 			APIURL:  getenv("AQARA_API_URL", "https://open-ger.aqara.com"),

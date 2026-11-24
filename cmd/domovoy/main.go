@@ -89,6 +89,13 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("telegram: %w", err)
 	}
+	if cfg.Telegram.AdminChatID != 0 {
+		access, err := bot.OpenAccessStore(filepath.Join(cfg.DataDir, "access.json"))
+		if err != nil {
+			return fmt.Errorf("access store: %w", err)
+		}
+		b.EnableAccessRequests(cfg.Telegram.AdminChatID, access)
+	}
 
 	watcher := alert.NewWatcher(home, b.Notifier(cfg.Alerts.ChatIDs), alert.DefaultRules, cfg.Alerts.PollInterval, log)
 	go watcher.Run(ctx)

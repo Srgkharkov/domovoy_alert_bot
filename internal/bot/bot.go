@@ -36,6 +36,13 @@ type Bot struct {
 	allowed map[int64]bool
 	log     *slog.Logger
 	redact  *strings.Replacer
+
+	// Access requests (optional, see EnableAccessRequests). Updates are
+	// handled sequentially, so pending maps need no locking.
+	adminChatID  int64
+	access       *AccessStore
+	pending      map[int64]bool   // chats with a request awaiting the admin
+	pendingTitle map[int64]string // their display titles
 }
 
 // New connects to Telegram and returns a bot. allowedChatIDs restricts who can
@@ -74,7 +81,10 @@ func New(ctx context.Context, token string, home SmartHome, allowedChatIDs []int
 		allowed[id] = true
 	}
 	log.Info("telegram authorized", "bot", api.Self.UserName, "allowed_chats", len(allowed))
-	return &Bot{api: api, home: home, allowed: allowed, log: log, redact: redact}, nil
+	return &Bot{
+		api: api, home: home, allowed: allowed, log: log, redact: redact,
+		pending: map[int64]bool{}, pendingTitle: map[int64]string{},
+	}, nil
 }
 
 // errText returns err as a string with the bot token removed.
@@ -131,12 +141,25 @@ func (b *Bot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 	switch {
 	case upd.Message != nil && upd.Message.IsCommand():
 		b.handleCommand(ctx, upd.Message)
+	case upd.Message != nil && upd.Message.Chat.IsPrivate() && !b.isAllowed(upd.Message.Chat.ID):
+		// A stranger writing to the bot directly, without a command.
+		b.handleUnknownChat(upd.Message)
 	case upd.CallbackQuery != nil:
 		b.handleCallback(ctx, upd.CallbackQuery)
 	}
 }
 
-func (b *Bot) isAllowed(chatID int64) bool { return b.allowed[chatID] }
+// isAllowed reports whether a chat may control the home: listed in the
+// config, the admin's own chat, or approved by the admin.
+func (b *Bot) isAllowed(chatID int64) bool {
+	if b.allowed[chatID] {
+		return true
+	}
+	if b.access == nil {
+		return false
+	}
+	return chatID == b.adminChatID || b.access.IsApproved(chatID)
+}
 
 func (b *Bot) reply(chatID int64, text string) {
 	if _, err := b.api.Send(tgbotapi.NewMessage(chatID, text)); err != nil {
