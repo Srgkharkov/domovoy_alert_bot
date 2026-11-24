@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,10 +14,16 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"github.com/srgkharkov/domovoy_alert_bot/internal/home"
 )
 
+// allHomes in callback data approves a chat for every home.
+const allHomes = "*"
+
 const (
-	callbackAccessPrefix = "acc:" // acc:<action>:<chatID>, action = ok | no | rm
+	// acc:<action>:<chatID>[:<homeID>|*], action = ok | no | rm
+	callbackAccessPrefix = "acc:"
 	accessApprove        = "ok"
 	accessDeny           = "no"
 	accessRevoke         = "rm"
@@ -26,6 +33,7 @@ const (
 type AccessEntry struct {
 	ChatID    int64     `json:"chat_id"`
 	Title     string    `json:"title"`
+	Homes     []string  `json:"homes,omitempty"` // approved homes; empty = the Aqara home (legacy)
 	DecidedAt time.Time `json:"decided_at"`
 }
 
@@ -87,11 +95,26 @@ func (s *AccessStore) IsDenied(chatID int64) bool {
 	return ok
 }
 
-// Approve grants access (and clears an earlier denial).
-func (s *AccessStore) Approve(chatID int64, title string) error {
+// Homes returns the homes a chat was approved for.
+func (s *AccessStore) Homes(chatID int64) ([]string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.approved[chatID]
+	return e.Homes, ok
+}
+
+// Approve grants access to homes (and clears an earlier denial). Homes are
+// added to those the chat already has.
+func (s *AccessStore) Approve(chatID int64, title string, homes []string) error {
 	return s.update(func() {
 		delete(s.denied, chatID)
-		s.approved[chatID] = AccessEntry{ChatID: chatID, Title: title, DecidedAt: s.now()}
+		merged := append([]string(nil), s.approved[chatID].Homes...)
+		for _, h := range homes {
+			if !slices.Contains(merged, h) {
+				merged = append(merged, h)
+			}
+		}
+		s.approved[chatID] = AccessEntry{ChatID: chatID, Title: title, Homes: merged, DecidedAt: s.now()}
 	})
 }
 
@@ -214,11 +237,7 @@ func (b *Bot) handleUnknownChat(m *tgbotapi.Message) {
 		text += "\nНаписал(а): " + displayName(m.From)
 	}
 	req := tgbotapi.NewMessage(b.adminChatID, text)
-	id := strconv.FormatInt(chatID, 10)
-	req.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("✅ Разрешить", callbackAccessPrefix+accessApprove+":"+id),
-		tgbotapi.NewInlineKeyboardButtonData("❌ Отклонить", callbackAccessPrefix+accessDeny+":"+id),
-	))
+	req.ReplyMarkup = b.accessRequestKeyboard(chatID)
 	if _, err := b.api.Send(req); err != nil {
 		b.log.Error("send access request", "err", b.errText(err))
 		b.reply(chatID, "⚠️ Не удалось отправить запрос администратору, попробуйте позже.")
@@ -230,26 +249,55 @@ func (b *Bot) handleUnknownChat(m *tgbotapi.Message) {
 	b.reply(chatID, "👋 Это бот умного дома. Запрос на доступ отправлен администратору — я напишу, когда он ответит.")
 }
 
-// parseAccessData splits "acc:<action>:<chatID>".
-func parseAccessData(data string) (action string, chatID int64, ok bool) {
+// accessRequestKeyboard offers one approve button per home, "all homes"
+// when there are several, and deny.
+func (b *Bot) accessRequestKeyboard(chatID int64) tgbotapi.InlineKeyboardMarkup {
+	id := strconv.FormatInt(chatID, 10)
+	data := func(action, home string) string {
+		d := callbackAccessPrefix + action + ":" + id
+		if home != "" {
+			d += ":" + home
+		}
+		return d
+	}
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, h := range b.homes {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ "+h.Name(), data(accessApprove, h.ID()))))
+	}
+	if len(b.homes) > 1 {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Все дома", data(accessApprove, allHomes))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("❌ Отклонить", data(accessDeny, ""))))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// parseAccessData splits "acc:<action>:<chatID>[:<home>]".
+func parseAccessData(data string) (action string, chatID int64, homeArg string, ok bool) {
 	rest, ok := strings.CutPrefix(data, callbackAccessPrefix)
 	if !ok {
-		return "", 0, false
+		return "", 0, "", false
 	}
-	action, idStr, ok := strings.Cut(rest, ":")
-	if !ok {
-		return "", 0, false
+	parts := strings.SplitN(rest, ":", 3)
+	if len(parts) < 2 {
+		return "", 0, "", false
 	}
+	action = parts[0]
 	switch action {
 	case accessApprove, accessDeny, accessRevoke:
 	default:
-		return "", 0, false
+		return "", 0, "", false
 	}
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	id, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
-		return "", 0, false
+		return "", 0, "", false
 	}
-	return action, id, true
+	if len(parts) == 3 {
+		homeArg = parts[2]
+	}
+	return action, id, homeArg, true
 }
 
 // handleAccessCallback processes the admin's button presses.
@@ -258,7 +306,7 @@ func (b *Bot) handleAccessCallback(q *tgbotapi.CallbackQuery) {
 		b.answerCallback(q.ID, "⛔ Только для администратора")
 		return
 	}
-	action, chatID, ok := parseAccessData(q.Data)
+	action, chatID, homeArg, ok := parseAccessData(q.Data)
 	if !ok {
 		b.answerCallback(q.ID, "")
 		return
@@ -288,9 +336,14 @@ func (b *Bot) handleAccessCallback(q *tgbotapi.CallbackQuery) {
 	var err error
 	var result, toUser string
 	if action == accessApprove {
-		err = b.access.Approve(chatID, title)
-		result = "✅ Доступ разрешён"
-		toUser = "✅ Администратор открыл доступ.\n\n" + helpText
+		homes, names := b.resolveHomes(homeArg)
+		if len(homes) == 0 {
+			b.answerCallback(q.ID, "Неизвестный дом")
+			return
+		}
+		err = b.access.Approve(chatID, title, homes)
+		result = "✅ Доступ разрешён: " + names
+		toUser = "✅ Администратор открыл доступ к дому: " + names + ".\n\n" + helpText
 	} else {
 		err = b.access.Deny(chatID, title)
 		result = "❌ Доступ отклонён"
@@ -312,6 +365,19 @@ func (b *Bot) handleAccessCallback(q *tgbotapi.CallbackQuery) {
 		b.log.Error("edit access request", "err", b.errText(err))
 	}
 	b.reply(chatID, toUser)
+}
+
+// resolveHomes turns a callback home argument into home IDs and their
+// display names. An empty argument (old buttons) means the Aqara home.
+func (b *Bot) resolveHomes(arg string) ([]string, string) {
+	var ids, names []string
+	for _, h := range b.homes {
+		if arg == allHomes || h.ID() == arg || (arg == "" && h.ID() == home.AqaraID) {
+			ids = append(ids, h.ID())
+			names = append(names, "«"+h.Name()+"»")
+		}
+	}
+	return ids, strings.Join(names, ", ")
 }
 
 // cmdAccess shows the admin who has access, with revoke buttons.
@@ -353,8 +419,16 @@ func (b *Bot) accessList() (string, *tgbotapi.InlineKeyboardMarkup) {
 	sb.WriteString("\nОдобрены по запросу (нажмите, чтобы отозвать):")
 	var rows [][]tgbotapi.InlineKeyboardButton
 	for _, e := range entries {
+		homes := e.Homes
+		if len(homes) == 0 {
+			homes = []string{home.AqaraID}
+		}
+		var names []string
+		for _, h := range homes {
+			names = append(names, b.homeName(h))
+		}
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(
-			"🗑 "+e.Title, callbackAccessPrefix+accessRevoke+":"+strconv.FormatInt(e.ChatID, 10))))
+			"🗑 "+e.Title+" → "+strings.Join(names, ", "), callbackAccessPrefix+accessRevoke+":"+strconv.FormatInt(e.ChatID, 10))))
 	}
 	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return sb.String(), &markup

@@ -27,6 +27,8 @@ import (
 	"github.com/srgkharkov/domovoy_alert_bot/internal/aqara"
 	"github.com/srgkharkov/domovoy_alert_bot/internal/bot"
 	"github.com/srgkharkov/domovoy_alert_bot/internal/config"
+	homepkg "github.com/srgkharkov/domovoy_alert_bot/internal/home"
+	"github.com/srgkharkov/domovoy_alert_bot/internal/tuya"
 )
 
 // version is set at build time: -ldflags "-X main.version=..."
@@ -76,7 +78,13 @@ func run(args []string) error {
 			if err := cfg.ValidateAqara(); err != nil {
 				return err
 			}
-			return runCheck(ctx, home)
+			if err := runCheck(ctx, home); err != nil {
+				return err
+			}
+			if cfg.Tuya.Enabled() {
+				return runCheckTuya(ctx, cfg.Tuya, log)
+			}
+			return nil
 		default:
 			return fmt.Errorf("unknown command %q", args[0])
 		}
@@ -85,7 +93,17 @@ func run(args []string) error {
 	if err := cfg.ValidateBot(); err != nil {
 		return err
 	}
-	b, err := bot.New(ctx, cfg.Telegram.Token, home, cfg.Telegram.AllowedChatIDs, log)
+	homes := []homepkg.Home{homepkg.NewAqara(cfg.Aqara.HomeName, home)}
+	if cfg.Tuya.Enabled() {
+		homes = append(homes, tuyaHomes(ctx, cfg.Tuya, log)...)
+	}
+	b, err := bot.New(ctx, bot.Options{
+		Token:          cfg.Telegram.Token,
+		Aqara:          home,
+		Homes:          homes,
+		AllowedChatIDs: cfg.Telegram.AllowedChatIDs,
+		Log:            log,
+	})
 	if err != nil {
 		return fmt.Errorf("telegram: %w", err)
 	}
@@ -108,6 +126,30 @@ func run(args []string) error {
 
 	log.Info("domovoy started", "version", version, "alert_chats", len(cfg.Alerts.ChatIDs))
 	return b.Run(ctx)
+}
+
+// tuyaHomes builds Tuya homes; names come from the API, with a fallback so a
+// Tuya outage at startup does not stop the bot.
+func tuyaHomes(ctx context.Context, cfg config.Tuya, log *slog.Logger) []homepkg.Home {
+	client := newTuyaClient(cfg)
+	var out []homepkg.Home
+	for _, id := range cfg.HomeIDs {
+		name := fmt.Sprintf("Tuya %d", id)
+		reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		h, err := client.Home(reqCtx, id)
+		cancel()
+		if err != nil {
+			log.Warn("tuya home name", "home", id, "err", err)
+		} else {
+			name = h.Name
+		}
+		out = append(out, homepkg.NewTuya(client, id, name))
+	}
+	return out
+}
+
+func newTuyaClient(cfg config.Tuya) *tuya.Client {
+	return tuya.NewClient(tuya.Options{BaseURL: cfg.APIURL, AccessID: cfg.AccessID, Secret: cfg.Secret})
 }
 
 // runPushServer serves Aqara Message Push callbacks on /aqara/push/<secret>.
@@ -207,6 +249,36 @@ func runCheck(ctx context.Context, c *aqara.Client) error {
 			status = "🔴"
 		}
 		fmt.Printf("  %s %-30s %-28s %s\n", status, d.DeviceName, d.Model, d.DID)
+	}
+	return nil
+}
+
+// runCheckTuya prints Tuya homes with devices and current readings.
+func runCheckTuya(ctx context.Context, cfg config.Tuya, log *slog.Logger) error {
+	for _, h := range tuyaHomes(ctx, cfg, log) {
+		fmt.Printf("\nTuya: 🏠 %s  [%s]\n", h.Name(), h.ID())
+		devices, err := h.Devices(ctx)
+		if err != nil {
+			return err
+		}
+		for _, d := range devices {
+			status := "🟢"
+			if !d.Online {
+				status = "🔴"
+			}
+			fmt.Printf("  %s %-30s %s\n", status, d.Name, d.Model)
+		}
+		readings, err := h.Readings(ctx)
+		if err != nil {
+			return err
+		}
+		kinds := map[homepkg.Kind]string{
+			homepkg.Temperature: "°C", homepkg.Humidity: "% RH", homepkg.Battery: "% battery",
+			homepkg.Power: "W", homepkg.Energy: "kWh total",
+		}
+		for _, r := range readings {
+			fmt.Printf("     %-28s %10.2f %s\n", r.Device, r.Value, kinds[r.Kind])
+		}
 	}
 	return nil
 }

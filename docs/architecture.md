@@ -17,6 +17,8 @@
 | `cmd/domovoy` | Точка входа. Читает конфиг, собирает зависимости, разбирает CLI (`auth`, `version`), обрабатывает SIGTERM. |
 | `internal/config` | Настройки из переменных окружения, их проверка. |
 | `internal/aqara` | Клиент Aqara Open API v3. Ничего не знает о Telegram. |
+| `internal/tuya` | Клиент Tuya Cloud Open API: подпись HMAC-SHA256, токен (simple mode), дома, устройства, спецификации DP. |
+| `internal/home` | Интерфейс `Home` (устройства, показания) и адаптеры Aqara и Tuya. Команды `/devices`, `/status` работают через него. |
 | `internal/bot` | Логика Telegram. От Aqara зависит только через интерфейс `SmartHome`, поэтому его можно тестировать с подменой. |
 
 ## Aqara Open API
@@ -41,6 +43,29 @@ Sign = md5( lower( "Accesstoken=…&Appid=…&Keyid=…&Nonce=…&Time=…" + Ap
 | `config.scene.run` | кнопка сценария |
 | `query.resource.value`, `query.resource.name`, `write.resource.device` | `/light`: состояние, имена каналов, переключение |
 
+## Tuya Cloud API
+
+Подпись: `sign = HMAC-SHA256(secret, client_id + access_token + t + nonce + stringToSign)`, где
+`stringToSign = METHOD \n sha256(body) \n \n /path?отсортированный=query`. Токен (`grant_type=1`) живёт ~2 ч,
+клиент берёт новый по истечении или при кодах 1010–1012.
+
+| Endpoint | Для чего |
+|---|---|
+| `GET /v1.0/token?grant_type=1` | токен доступа |
+| `GET /v1.0/homes/{home_id}` | название дома |
+| `GET /v1.0/homes/{home_id}/devices` | устройства дома с текущими DP (`status`) |
+| `GET /v1.0/iot-03/devices/{id}/specification` | единицы и `scale` DP (кэшируется) |
+
+Значения целочисленных DP приходят без запятой: `value / 10^scale`. Коды, которые бот показывает в `/status`:
+`va_temperature`/`temp_current`, `va_humidity`/`humidity_value`, `battery_percentage`, `power_total`/`cur_power`
+(приводится к Вт), `forward_energy_total`/`add_ele` (кВт·ч).
+
+## Несколько домов
+
+У каждого дома ID (`aqara`, `tuya-<home_id>`) и название. Чат может иметь доступ к нескольким домам;
+тогда `/devices` и `/status` сначала показывают кнопки выбора дома (`home:<cmd>:<homeID>`).
+Пульт `/light`, сценарии и алерты о протечке пока работают только для дома Aqara.
+
 ## Доступ
 
 Проверка идёт по **ID чата**, а не пользователя. Любой участник семейного чата может управлять домом, а из чужих чатов бот откажет. Исключение — `/chatid`, он нужен для настройки.
@@ -50,7 +75,7 @@ Sign = md5( lower( "Accesstoken=…&Appid=…&Keyid=…&Nonce=…&Time=…" + Ap
 
 ```
 незнакомый чат ──/start──▶ бот ──🔔 запрос [✅|❌]──▶ личка админа
-        ▲                                            │ callback acc:ok|no:<chatID>
+        ▲                                            │ callback acc:ok:<chatID>:<homeID|*>, acc:no:<chatID>
         └──────────── «доступ открыт / отклонён» ◀───┘ (проверка: нажато в чате админа)
 ```
 

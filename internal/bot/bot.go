@@ -13,6 +13,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/srgkharkov/domovoy_alert_bot/internal/aqara"
+	"github.com/srgkharkov/domovoy_alert_bot/internal/home"
 )
 
 // connectAttempts is how many times New retries getMe on network errors.
@@ -32,8 +33,10 @@ type SmartHome interface {
 // Bot is the Telegram bot.
 type Bot struct {
 	api     *tgbotapi.BotAPI
-	home    SmartHome
-	allowed map[int64]bool
+	home    SmartHome   // Aqara account: light panel, scenes
+	homes   []home.Home // all homes, Aqara first
+	byID    map[string]home.Home
+	allowed map[int64]bool // config chats, bound to the Aqara home
 	log     *slog.Logger
 	redact  *strings.Replacer
 
@@ -45,10 +48,21 @@ type Bot struct {
 	pendingTitle map[int64]string // their display titles
 }
 
-// New connects to Telegram and returns a bot. allowedChatIDs restricts who can
-// control the home; if empty, the bot only answers /chatid (setup mode).
+// Options configure the bot.
+type Options struct {
+	Token string
+	Aqara SmartHome   // the Aqara account client
+	Homes []home.Home // all homes; the Aqara home must have ID home.AqaraID
+	// AllowedChatIDs may control the Aqara home; if empty (and no admin is
+	// set), the bot only answers /chatid (setup mode).
+	AllowedChatIDs []int64
+	Log            *slog.Logger
+}
+
+// New connects to Telegram and returns a bot.
 // Transient network errors on startup are retried with exponential backoff.
-func New(ctx context.Context, token string, home SmartHome, allowedChatIDs []int64, log *slog.Logger) (*Bot, error) {
+func New(ctx context.Context, opts Options) (*Bot, error) {
+	token, log := opts.Token, opts.Log
 	// The Bot API token is part of every request URL, so it leaks into
 	// net/http errors. Scrub it from everything we and the library log.
 	redact := strings.NewReplacer(token, "<TOKEN>")
@@ -76,15 +90,26 @@ func New(ctx context.Context, token string, home SmartHome, allowedChatIDs []int
 		delay *= 2
 	}
 
-	allowed := make(map[int64]bool, len(allowedChatIDs))
-	for _, id := range allowedChatIDs {
-		allowed[id] = true
-	}
-	log.Info("telegram authorized", "bot", api.Self.UserName, "allowed_chats", len(allowed))
-	return &Bot{
-		api: api, home: home, allowed: allowed, log: log, redact: redact,
+	b := newBot(opts.Aqara, opts.Homes, opts.AllowedChatIDs, log)
+	b.api, b.redact = api, redact
+	log.Info("telegram authorized", "bot", api.Self.UserName, "allowed_chats", len(b.allowed), "homes", len(b.homes))
+	return b, nil
+}
+
+// newBot builds the bot state without connecting to Telegram (used by tests).
+func newBot(aqaraAPI SmartHome, homes []home.Home, allowedChatIDs []int64, log *slog.Logger) *Bot {
+	b := &Bot{
+		home: aqaraAPI, homes: homes, byID: map[string]home.Home{},
+		allowed: map[int64]bool{}, log: log, redact: strings.NewReplacer(),
 		pending: map[int64]bool{}, pendingTitle: map[int64]string{},
-	}, nil
+	}
+	for _, h := range homes {
+		b.byID[h.ID()] = h
+	}
+	for _, id := range allowedChatIDs {
+		b.allowed[id] = true
+	}
+	return b
 }
 
 // errText returns err as a string with the bot token removed.
@@ -149,17 +174,8 @@ func (b *Bot) handleUpdate(ctx context.Context, upd tgbotapi.Update) {
 	}
 }
 
-// isAllowed reports whether a chat may control the home: listed in the
-// config, the admin's own chat, or approved by the admin.
-func (b *Bot) isAllowed(chatID int64) bool {
-	if b.allowed[chatID] {
-		return true
-	}
-	if b.access == nil {
-		return false
-	}
-	return chatID == b.adminChatID || b.access.IsApproved(chatID)
-}
+// isAllowed reports whether a chat may control at least one home.
+func (b *Bot) isAllowed(chatID int64) bool { return len(b.homesFor(chatID)) > 0 }
 
 func (b *Bot) reply(chatID int64, text string) {
 	if _, err := b.api.Send(tgbotapi.NewMessage(chatID, text)); err != nil {

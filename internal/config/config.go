@@ -17,6 +17,7 @@ import (
 type Config struct {
 	Telegram Telegram
 	Aqara    Aqara
+	Tuya     Tuya
 	Alerts   Alerts
 	DataDir  string // directory for persistent state (Aqara tokens)
 	LogLevel string // debug | info | warn | error
@@ -46,7 +47,20 @@ type Aqara struct {
 	AppKey  string
 	KeyID   string
 	Account string // Aqara Home account (email / phone) used for authorization
+	// HomeName is how the bot calls the Aqara home in chats.
+	HomeName string
 }
+
+// Tuya holds Tuya Cloud (platform.tuya.com) settings. Disabled if AccessID is empty.
+type Tuya struct {
+	APIURL   string // regional endpoint, e.g. https://openapi.tuyaeu.com
+	AccessID string
+	Secret   string
+	HomeIDs  []int64 // Tuya app homes the bot manages
+}
+
+// Enabled reports whether Tuya is configured.
+func (t Tuya) Enabled() bool { return t.AccessID != "" }
 
 // Load reads configuration from the environment.
 func Load() (*Config, error) {
@@ -74,6 +88,11 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("ALERT_POLL_INTERVAL: %w", err)
 	}
 
+	tuyaHomes, err := parseInt64List(os.Getenv("TUYA_HOME_IDS"))
+	if err != nil {
+		return nil, fmt.Errorf("TUYA_HOME_IDS: %w", err)
+	}
+
 	return &Config{
 		Telegram: Telegram{
 			Token:          os.Getenv("TELEGRAM_BOT_TOKEN"),
@@ -81,11 +100,18 @@ func Load() (*Config, error) {
 			AdminChatID:    adminID,
 		},
 		Aqara: Aqara{
-			APIURL:  getenv("AQARA_API_URL", "https://open-ger.aqara.com"),
-			AppID:   os.Getenv("AQARA_APP_ID"),
-			AppKey:  os.Getenv("AQARA_APP_KEY"),
-			KeyID:   os.Getenv("AQARA_KEY_ID"),
-			Account: os.Getenv("AQARA_ACCOUNT"),
+			APIURL:   getenv("AQARA_API_URL", "https://open-ger.aqara.com"),
+			AppID:    os.Getenv("AQARA_APP_ID"),
+			AppKey:   os.Getenv("AQARA_APP_KEY"),
+			KeyID:    os.Getenv("AQARA_KEY_ID"),
+			Account:  os.Getenv("AQARA_ACCOUNT"),
+			HomeName: getenv("AQARA_HOME_NAME", "Дом"),
+		},
+		Tuya: Tuya{
+			APIURL:   getenv("TUYA_API_URL", "https://openapi.tuyaeu.com"),
+			AccessID: os.Getenv("TUYA_ACCESS_ID"),
+			Secret:   os.Getenv("TUYA_ACCESS_SECRET"),
+			HomeIDs:  tuyaHomes,
 		},
 		Alerts: Alerts{
 			ChatIDs:        alertChats,
@@ -122,6 +148,9 @@ func (c *Config) ValidateAqara() error {
 func (c *Config) ValidateBot() error {
 	if c.Telegram.Token == "" {
 		return errors.New("missing required env: TELEGRAM_BOT_TOKEN")
+	}
+	if c.Tuya.Enabled() && (c.Tuya.Secret == "" || len(c.Tuya.HomeIDs) == 0) {
+		return errors.New("TUYA_ACCESS_ID is set: TUYA_ACCESS_SECRET and TUYA_HOME_IDS are required too")
 	}
 	return c.ValidateAqara()
 }

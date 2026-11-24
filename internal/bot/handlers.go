@@ -10,6 +10,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/srgkharkov/domovoy_alert_bot/internal/aqara"
+	"github.com/srgkharkov/domovoy_alert_bot/internal/home"
 )
 
 const (
@@ -20,6 +21,7 @@ const (
 func commandList() []tgbotapi.BotCommand {
 	return []tgbotapi.BotCommand{
 		{Command: "light", Description: "Пульт: свет и розетки"},
+		{Command: "status", Description: "Показания датчиков: температура, мощность"},
 		{Command: "devices", Description: "Список устройств и их статус"},
 		{Command: "scenes", Description: "Запустить сценарий"},
 		{Command: "chatid", Description: "Показать ID этого чата"},
@@ -30,7 +32,8 @@ func commandList() []tgbotapi.BotCommand {
 const helpText = `Домовой на связи 🏠
 
 /light — пульт: свет и розетки
-/devices — список устройств Aqara и их статус
+/status — показания датчиков: температура, влажность, мощность
+/devices — список устройств и их статус
 /scenes — список сценариев (нажмите кнопку, чтобы запустить)
 /chatid — ID этого чата (для настройки)
 /access — кто имеет доступ (только администратор)
@@ -57,39 +60,23 @@ func (b *Bot) handleCommand(ctx context.Context, m *tgbotapi.Message) {
 	switch cmd {
 	case "start", "help":
 		b.reply(chatID, helpText)
-	case "light":
-		b.cmdLight(ctx, chatID)
-	case "devices":
-		b.cmdDevices(ctx, chatID)
-	case "scenes":
-		b.cmdScenes(ctx, chatID)
+	case "light", "scenes":
+		if !b.hasHome(chatID, home.AqaraID) {
+			b.reply(chatID, fmt.Sprintf("Пульт и сценарии есть только в доме «%s».", b.homeName(home.AqaraID)))
+			return
+		}
+		if cmd == "light" {
+			b.cmdLight(ctx, chatID)
+		} else {
+			b.cmdScenes(ctx, chatID)
+		}
+	case "devices", "status":
+		b.runPerHome(ctx, chatID, cmd)
 	case "access":
 		b.cmdAccess(chatID)
 	default:
 		b.reply(chatID, "Не знаю такой команды. /help")
 	}
-}
-
-func (b *Bot) cmdDevices(ctx context.Context, chatID int64) {
-	devices, err := b.home.ListDevices(ctx)
-	if err != nil {
-		b.replyError(chatID, err)
-		return
-	}
-	if len(devices) == 0 {
-		b.reply(chatID, "Устройств не найдено.")
-		return
-	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Устройства (%d):\n\n", len(devices))
-	for _, d := range devices {
-		status := "🟢"
-		if !d.Online() {
-			status = "🔴"
-		}
-		fmt.Fprintf(&sb, "%s %s — %s\n", status, d.DeviceName, d.Model)
-	}
-	b.reply(chatID, sb.String())
 }
 
 func (b *Bot) cmdScenes(ctx context.Context, chatID int64) {
@@ -140,6 +127,16 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 
 	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
+
+	if strings.HasPrefix(q.Data, callbackHomePrefix) {
+		b.handleHomeCallback(ctx, q)
+		return
+	}
+	// Light panel and scenes act on the Aqara home.
+	if !b.hasHome(chatID, home.AqaraID) {
+		b.answerCallback(q.ID, "⛔ Нет доступа к этому дому")
+		return
+	}
 
 	if strings.HasPrefix(q.Data, callbackSwitchPrefix) {
 		b.handleSwitchCallback(ctx, q, q.Data)

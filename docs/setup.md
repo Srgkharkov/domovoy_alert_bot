@@ -39,6 +39,27 @@
 
 > Для неподтверждённого (individual) проекта у Aqara есть лимиты на число вызовов API. Подробности смотрите в консоли разработчика.
 
+## 2a. Tuya (необязательно)
+
+Нужно, если часть домов живёт в приложении **Tuya Smart** или **Smart Life**.
+
+1. Зарегистрироваться на [platform.tuya.com](https://platform.tuya.com) (подойдёт индивидуальный разработчик).
+2. **Cloud → Project Management → Create Cloud Project**: Industry *Smart Home*, Development Method *Smart Home*,
+   дата-центр — тот, где живёт аккаунт приложения (для аккаунтов с кодом страны +7 это **Central Europe**).
+   API-сервисы по умолчанию (IoT Core, Authorization, Smart Home Basic Service) оставить.
+3. В проекте: **Devices → Link App Account → Add App Account → Tuya App Account Authorization**.
+   Отсканировать QR-код в приложении («Я» → значок сканера), подтвердить. Затем **в браузере**
+   появится окно выбора способа привязки — выбрать *Automatic Link* и нажать **OK**: без этого шага аккаунт не привяжется.
+4. **Overview** → Access ID и Access Secret → в `TUYA_ACCESS_ID`, `TUYA_ACCESS_SECRET`; в `TUYA_API_URL` — endpoint дата-центра.
+5. `home_id` нужных домов → `TUYA_HOME_IDS`. Узнать их можно в API Explorer консоли
+   (*Smart Home Basic Service → Query Home List*, по UID пользователя из списка привязанных аккаунтов).
+6. `domovoy check` покажет дома Tuya, устройства и текущие показания.
+
+Бесплатный тариф IoT Core (Trial) нужно периодически продлевать в консоли, иначе API отключится.
+
+Каждый дом получает свой ID: `aqara` и `tuya-<home_id>`. Чаты из `TELEGRAM_ALLOWED_CHAT_IDS` видят только дом Aqara;
+новые чаты администратор при одобрении запроса привязывает к одному дому или ко всем; чат администратора видит все дома.
+
 ## 3. Авторизация Aqara
 
 Бот работает от имени аккаунта Aqara Home через токен OAuth. Получить его нужно один раз:
